@@ -11,6 +11,11 @@ import {
 import type { User } from "@supabase/supabase-js";
 import { QRCodeSVG } from "qrcode.react";
 import {
+  BrowserMultiFormatReader,
+  BrowserQRCodeReader,
+  type IScannerControls,
+} from "@zxing/browser";
+import {
   ArrowDownLeft,
   ArrowUpRight,
   Barcode,
@@ -1199,8 +1204,7 @@ function ActionModal({
   const [cameraOpen, setCameraOpen] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const scanTimerRef = useRef<number | null>(null);
+  const scannerControlsRef = useRef<IScannerControls | null>(null);
   const selectedItem = inventory.find((r) => r.id === selected)?.item;
   const qrPayload = JSON.stringify({
     app: "FinisPay",
@@ -1215,16 +1219,13 @@ function ActionModal({
   });
   useEffect(() => {
     return () => {
-      if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current);
-      streamRef.current?.getTracks().forEach((track) => track.stop());
+      scannerControlsRef.current?.stop();
     };
   }, []);
 
   function stopCamera() {
-    if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current);
-    scanTimerRef.current = null;
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
+    scannerControlsRef.current?.stop();
+    scannerControlsRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraOpen(false);
   }
@@ -1261,46 +1262,24 @@ function ActionModal({
   async function startCamera() {
     setScanStatus("Requesting camera access…");
     try {
-      const Detector = (
-        window as unknown as {
-          BarcodeDetector?: new (o: { formats: string[] }) => {
-            detect: (
-              source: HTMLVideoElement,
-            ) => Promise<{ rawValue: string }[]>;
-          };
-        }
-      ).BarcodeDetector;
-      if (!Detector) {
-        setScanStatus(
-          "Live QR detection is not supported in this browser. Upload a QR image instead.",
-        );
-        return;
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false,
-      });
-      streamRef.current = stream;
       setCameraOpen(true);
       await new Promise((resolve) => window.setTimeout(resolve, 0));
       const video = videoRef.current;
       if (!video) throw new Error("Camera preview unavailable");
-      video.srcObject = stream;
-      await video.play();
+      const reader = new BrowserQRCodeReader(undefined, {
+        delayBetweenScanAttempts: 300,
+      });
+      scannerControlsRef.current = await reader.decodeFromConstraints(
+        { video: { facingMode: { ideal: "environment" } }, audio: false },
+        video,
+        (result, _error, controls) => {
+          if (!result) return;
+          controls.stop();
+          scannerControlsRef.current = null;
+          setScannedCheckout(result.getText());
+        },
+      );
       setScanStatus("Align the FinisPay QR inside the frame.");
-      const detector = new Detector({ formats: ["qr_code"] });
-      const detectNext = async () => {
-        if (!streamRef.current || !videoRef.current) return;
-        try {
-          const codes = await detector.detect(videoRef.current);
-          if (codes[0]?.rawValue) {
-            setScannedCheckout(codes[0].rawValue);
-            return;
-          }
-        } catch {}
-        scanTimerRef.current = window.setTimeout(detectNext, 350);
-      };
-      detectNext();
     } catch (error) {
       stopCamera();
       const denied =
@@ -1360,32 +1339,22 @@ function ActionModal({
   }
   async function scanImage(file?: File) {
     if (!file) return;
+    const imageUrl = URL.createObjectURL(file);
     try {
-      const Detector = (
-        window as unknown as {
-          BarcodeDetector?: new (o: { formats: string[] }) => {
-            detect: (source: ImageBitmap) => Promise<{ rawValue: string }[]>;
-          };
-        }
-      ).BarcodeDetector;
-      if (!Detector) return;
-      const codes = await new Detector({
-        formats: ["ean_13", "ean_8", "qr_code", "code_128"],
-      }).detect(await createImageBitmap(file));
-      if (!codes[0]) {
-        setScanStatus("No readable barcode or QR was found in that image.");
-        return;
-      }
-      if (type === "scan") setScannedCheckout(codes[0].rawValue);
+      const result = await new BrowserMultiFormatReader().decodeFromImageUrl(
+        imageUrl,
+      );
+      if (type === "scan") setScannedCheckout(result.getText());
       else {
         const field =
           document.querySelector<HTMLInputElement>("#barcode-field");
-        if (field) field.value = codes[0].rawValue;
+        if (field) field.value = result.getText();
+        setScanStatus("Barcode read from image.");
       }
     } catch {
-      setScanStatus(
-        "This browser could not read that image. Enter the code manually.",
-      );
+      setScanStatus("No readable barcode or QR was found. Enter it manually.");
+    } finally {
+      URL.revokeObjectURL(imageUrl);
     }
   }
   return (
