@@ -2,6 +2,10 @@
 
 This is a new application, database and deployment. It does not reuse or modify the existing FinisFlow Supabase or Vercel projects.
 
+Production: https://finispay-finisflow-secure.vercel.app
+
+The production project uses repository-scoped GitHub deployment, an isolated Supabase project and Brevo custom SMTP for password-recovery email. SMTP credentials stay encrypted in Supabase and are not committed to this repository.
+
 ## Authentication behaviour
 
 - FinisPay is the only authentication entrance.
@@ -54,4 +58,5 @@ Run `pnpm test`, `pnpm lint` and `pnpm build`. For the cloud integration, verify
 
 ## Important email note
 
-Signup does not require email verification, OTP or a magic link. Password-reset email remains enabled. Supabase's default email sender is rate-limited and may restrict recipients; use a verified custom SMTP provider before production use.
+Signup does not require email verification, OTP or a magic link. Password-reset email remains enabled. The deployed project uses a verified Brevo sender through Supabase custom SMTP. For a separate deployment, configure a verified custom SMTP provider rather than relying on Supabase's restricted default sender.
+
