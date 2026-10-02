@@ -1,6 +1,13 @@
 "use client";
 
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import {
+  FormEvent,
+  ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { User } from "@supabase/supabase-js";
 import { QRCodeSVG } from "qrcode.react";
 import {
@@ -1189,16 +1196,122 @@ function ActionModal({
 }) {
   const [receiveAmount, setReceiveAmount] = useState(180);
   const [selected, setSelected] = useState(inventory[0]?.id || "");
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [scanStatus, setScanStatus] = useState("");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const scanTimerRef = useRef<number | null>(null);
   const selectedItem = inventory.find((r) => r.id === selected)?.item;
   const qrPayload = JSON.stringify({
     app: "FinisPay",
     recipient: profile.email,
     amount: receiveAmount,
     item: selectedItem?.name,
+    sku: selectedItem?.sku,
     batch: selectedItem?.batch,
+    manufacturedAt: selectedItem?.manufacturedAt,
     expiry: selectedItem?.expiryDate,
     code: `FP-${profile.id.slice(0, 6)}-${receiveAmount}`,
   });
+  useEffect(() => {
+    return () => {
+      if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  function stopCamera() {
+    if (scanTimerRef.current) window.clearTimeout(scanTimerRef.current);
+    scanTimerRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraOpen(false);
+  }
+
+  function setScannedCheckout(rawValue: string) {
+    try {
+      const value = JSON.parse(rawValue) as Record<string, unknown>;
+      const values: Record<string, string> = {
+        counterparty: String(value.recipient || "FinisPay merchant"),
+        amount: String(value.amount || 0),
+        product: String(value.item || "Scanned product"),
+        barcode: String(value.sku || value.code || rawValue),
+        batch: String(value.batch || "SCANNED"),
+        manufacturedAt: String(value.manufacturedAt || isoAfter(-1)),
+        expiryDate: String(value.expiry || isoAfter(14)),
+      };
+      Object.entries(values).forEach(([name, fieldValue]) => {
+        const field = document.querySelector<HTMLInputElement>(
+          `.scan-payment-form [name="${name}"]`,
+        );
+        if (field) field.value = fieldValue;
+      });
+      setScanStatus("Checkout scanned. Review the details, then pay.");
+    } catch {
+      const field = document.querySelector<HTMLInputElement>(
+        '.scan-payment-form [name="barcode"]',
+      );
+      if (field) field.value = rawValue;
+      setScanStatus("Code scanned. Product barcode has been filled in.");
+    }
+    stopCamera();
+  }
+
+  async function startCamera() {
+    setScanStatus("Requesting camera access…");
+    try {
+      const Detector = (
+        window as unknown as {
+          BarcodeDetector?: new (o: { formats: string[] }) => {
+            detect: (
+              source: HTMLVideoElement,
+            ) => Promise<{ rawValue: string }[]>;
+          };
+        }
+      ).BarcodeDetector;
+      if (!Detector) {
+        setScanStatus(
+          "Live QR detection is not supported in this browser. Upload a QR image instead.",
+        );
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setCameraOpen(true);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      const video = videoRef.current;
+      if (!video) throw new Error("Camera preview unavailable");
+      video.srcObject = stream;
+      await video.play();
+      setScanStatus("Align the FinisPay QR inside the frame.");
+      const detector = new Detector({ formats: ["qr_code"] });
+      const detectNext = async () => {
+        if (!streamRef.current || !videoRef.current) return;
+        try {
+          const codes = await detector.detect(videoRef.current);
+          if (codes[0]?.rawValue) {
+            setScannedCheckout(codes[0].rawValue);
+            return;
+          }
+        } catch {}
+        scanTimerRef.current = window.setTimeout(detectNext, 350);
+      };
+      detectNext();
+    } catch (error) {
+      stopCamera();
+      const denied =
+        error instanceof DOMException && error.name === "NotAllowedError";
+      setScanStatus(
+        denied
+          ? "Camera permission was not granted. Allow camera access or upload a QR image."
+          : "Camera could not start. Upload a QR image or enter the details manually.",
+      );
+    }
+  }
   function submitPay(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
@@ -1259,9 +1372,21 @@ function ActionModal({
       const codes = await new Detector({
         formats: ["ean_13", "ean_8", "qr_code", "code_128"],
       }).detect(await createImageBitmap(file));
-      const field = document.querySelector<HTMLInputElement>("#barcode-field");
-      if (field && codes[0]) field.value = codes[0].rawValue;
-    } catch {}
+      if (!codes[0]) {
+        setScanStatus("No readable barcode or QR was found in that image.");
+        return;
+      }
+      if (type === "scan") setScannedCheckout(codes[0].rawValue);
+      else {
+        const field =
+          document.querySelector<HTMLInputElement>("#barcode-field");
+        if (field) field.value = codes[0].rawValue;
+      }
+    } catch {
+      setScanStatus(
+        "This browser could not read that image. Enter the code manually.",
+      );
+    }
   }
   return (
     <div
@@ -1444,7 +1569,45 @@ function ActionModal({
                 ? "The payment adds the product and expiry details to FinisFlow automatically."
                 : "No real money or message is sent."}
             </p>
-            <form className="modal-form" onSubmit={submitPay}>
+            {type === "scan" && (
+              <div className="live-scan-card">
+                <div className="live-scan-actions">
+                  <button
+                    type="button"
+                    onClick={startCamera}
+                    disabled={cameraOpen}
+                  >
+                    <Camera /> {cameraOpen ? "Camera open" : "Open camera"}
+                  </button>
+                  <label>
+                    <QrCode /> Scan QR image
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      onChange={(e) => scanImage(e.target.files?.[0])}
+                    />
+                  </label>
+                </div>
+                {cameraOpen && (
+                  <div className="camera-frame">
+                    <video ref={videoRef} playsInline muted />
+                    <div className="camera-guide" />
+                    <button type="button" onClick={stopCamera}>
+                      Stop camera
+                    </button>
+                  </div>
+                )}
+                <p className="scan-status" role="status" aria-live="polite">
+                  {scanStatus ||
+                    "Use your rear camera, upload a QR image, or enter details below."}
+                </p>
+              </div>
+            )}
+            <form
+              className={`modal-form ${type === "scan" ? "scan-payment-form" : ""}`}
+              onSubmit={submitPay}
+            >
               <Field
                 name="counterparty"
                 label={type === "scan" ? "Merchant" : "Contact or mobile"}
@@ -1460,11 +1623,7 @@ function ActionModal({
                 <div className="form-grid product-fields">
                   <Field name="product" label="Product" value="Fresh Milk 1L" />
                   <Field name="barcode" label="Barcode" value="8901491501021" />
-                  <Field
-                    name="batch"
-                    label="Batch"
-                  value="ML-DEMO"
-                  />
+                  <Field name="batch" label="Batch" value="ML-DEMO" />
                   <Field
                     name="manufacturedAt"
                     label="Manufactured"
