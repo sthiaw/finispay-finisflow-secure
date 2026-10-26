@@ -1,62 +1,53 @@
-# FinisPay × FinisFlow — isolated secure account
+# FinisPay × FinisFlow
 
-This is a new application, database and deployment. It does not reuse or modify the existing FinisFlow Supabase or Vercel projects.
+Interactive software-only prototype connecting simulated payments with inventory, batch, manufacturing-date and expiry tracking.
 
 Production: https://finispay-finisflow-secure.vercel.app
 
-The production project uses repository-scoped GitHub deployment, an isolated Supabase project and Brevo custom SMTP for password-recovery email. SMTP credentials stay encrypted in Supabase and are not committed to this repository.
+## Current demo access
 
-## Authentication behaviour
+- FinisPay is the single entrance for both FinisPay and FinisFlow.
+- Create a profile with one username only; no email, password, OTP or login link is requested.
+- Login matches the username exactly and is case-sensitive. For example, `ShantanuT` and `shantanut` are different profiles.
+- The active profile, inventory, simulated payments and dashboard activity are stored in that browser's local storage and restored after refresh or reopen.
+- Signing out removes only the active session; the browser keeps that profile's demo data for the next exact-username login.
 
-- FinisPay is the only authentication entrance.
-- Sign-up uses full name, email and password. There is no OTP or magic-link login.
-- A successful signup starts a session immediately and opens the personal dashboard.
-- The same session opens FinisFlow without another login.
-- Supabase Auth owns password hashes. Application tables and browser code never receive or store plain-text passwords.
-- The browser stores only the Supabase session required to remain signed in.
-- Forgot password uses Supabase's password-recovery email.
+## Important security limitation
+
+Username-only access is intentionally a demonstration mode, not secure authentication. Anyone using the same browser and knowing an exact username can open that profile. Do not enter sensitive, personal or real payment information. Cross-device login is not supported.
+
+The earlier Supabase schema and Row Level Security migration remain in this repository for a future secure account mode, but the username-only demo does not weaken or anonymously expose those database tables. A production service should use a second factor such as a passkey, PIN, password or verified link.
+
+## Features
+
+- FinisPay send, receive, QR generation and QR/barcode camera simulation
+- Automatic demo inventory capture after a simulated purchase
+- Manufacturing-date and expiry tracking
+- FEFO ordering and at-risk inventory value
+- Discount, bundle, move, return and reorder recommendations
+- Personal browser-local profile and activity persistence
 
 ## Local setup
 
-1. Create a new Supabase project specifically for this application.
-2. In **Authentication → Providers → Email**, enable email/password and disable **Confirm email** so signup returns a session immediately.
-3. Apply `supabase/migrations/20261001000000_initial_auth_schema.sql` to the new project.
-4. Copy `.env.example` to `.env.local` and provide the new project's URL and publishable key.
-5. Install and run:
+```bash
+pnpm install
+pnpm dev
+```
 
-   ```bash
-   pnpm install
-   pnpm dev
-   ```
+No environment variables are required for the current browser-local demo mode. `.env.example` documents the optional isolated Supabase configuration retained for a future secure mode. Never add a Supabase service-role key to frontend code, Vercel client variables or GitHub.
 
-## Supabase configuration
+## Deployment
 
-Set the Authentication Site URL to the production Vercel URL. Add local development and production URLs to the redirect allow list so password recovery can return to the application.
-
-The migration creates:
-
-- `profiles`, keyed to `auth.users.id` and populated by an `auth.users` trigger.
-- `user_dashboard_data`, keyed by `user_id`.
-- ownership indexes, timestamp triggers, explicit Data API grants and Row Level Security policies based on `auth.uid()`.
-
-The frontend uses only `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Never add a service-role or secret key to Vercel client variables, GitHub or a `NEXT_PUBLIC_` variable.
-
-## Vercel deployment
-
-Create a new Vercel project from this repository. Add both public environment variables for Production, Preview and Development, then deploy. The included `vercel.json` selects Next.js and adds safe response headers.
+The `main` branch deploys automatically to the existing `finispay-finisflow-secure` Vercel project. The included `vercel.json` selects Next.js and adds response-security headers.
 
 ## Verification
 
-Run `pnpm test`, `pnpm lint` and `pnpm build`. For the cloud integration, verify:
+Run `pnpm test`, `pnpm lint` and `pnpm build`, then verify:
 
-1. A first signup opens a dashboard displaying the exact saved full name.
-2. Add activity, log out, log in and confirm the activity returns.
-3. A second account cannot query or modify the first account's profile or dashboard rows.
-4. Refresh and reopen the app and confirm the session persists.
-5. Confirm an incorrect password is rejected with a generic message.
-6. Confirm `profiles`, `user_dashboard_data` and browser storage contain no password fields or password values.
-
-## Important email note
-
-Signup does not require email verification, OTP or a magic link. Password-reset email remains enabled. The deployed project uses a verified Brevo sender through Supabase custom SMTP. For a separate deployment, configure a verified custom SMTP provider rather than relying on Supabase's restricted default sender.
+1. Create `DemoUser` and confirm its dashboard opens.
+2. Add inventory or a simulated payment, refresh, and confirm it remains.
+3. Sign out and log in with `DemoUser`; confirm the same data returns.
+4. Try `demouser`; confirm it does not match `DemoUser`.
+5. Create a second username and confirm its browser-local dashboard starts separately.
+6. Confirm the interface never asks for or stores a password.
 

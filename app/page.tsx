@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import type { User } from "@supabase/supabase-js";
 import { QRCodeSVG } from "qrcode.react";
 import {
   BrowserMultiFormatReader,
@@ -26,8 +25,6 @@ import {
   ChevronRight,
   CircleUserRound,
   CreditCard,
-  Eye,
-  EyeOff,
   House,
   Leaf,
   LogOut,
@@ -46,7 +43,6 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { getSupabase } from "@/lib/supabase";
 import type {
   DashboardRecord,
   InventoryData,
@@ -54,20 +50,22 @@ import type {
   Profile,
   WalletData,
 } from "@/lib/types";
-import { emailPattern, validateSignup } from "@/lib/validation";
+import { validateUsername } from "@/lib/validation";
 
 type Mode = "login" | "signup";
-type Status = "loading" | "signedOut" | "signedIn" | "recovery" | "unavailable";
+type Status = "loading" | "signedOut" | "signedIn";
 type View = "home" | "pay" | "inventory" | "insights" | "profile";
 type Modal = "scan" | "receive" | "send" | "add" | null;
 type InventoryRow = DashboardRecord & { item: InventoryData };
 type PaymentRow = DashboardRecord & { payment: PaymentData };
-const emptySignup = {
-  fullName: "",
-  email: "",
-  password: "",
-  confirmPassword: "",
-};
+const SESSION_KEY = "finispay_demo_session_v1";
+const profileKey = (username: string) =>
+  `finispay_demo_profile_v1:${encodeURIComponent(username)}`;
+const recordsKey = (username: string) =>
+  `finispay_demo_records_v1:${encodeURIComponent(username)}`;
+const makeId = () =>
+  globalThis.crypto?.randomUUID?.() ||
+  `demo-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const money = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -133,31 +131,56 @@ const starterInventory: InventoryData[] = [
   },
 ];
 
-function friendlyAuthError(message: string, mode: Mode) {
-  const value = message.toLowerCase();
-  if (value.includes("already") || value.includes("registered"))
-    return "This email is already registered. Try logging in instead.";
-  if (
-    mode === "login" &&
-    (value.includes("invalid login") || value.includes("credentials"))
-  )
-    return "Incorrect email or password.";
-  if (value.includes("password"))
-    return "The password is invalid. Check the requirements and try again.";
-  return "Authentication is temporarily unavailable. Please try again.";
+function readLocal<T>(key: string): T | null {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? (JSON.parse(value) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocal(key: string, value: unknown) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function starterRecords(userId: string): DashboardRecord[] {
+  const now = new Date().toISOString();
+  const record = (
+    data_type: string,
+    data: Record<string, unknown>,
+  ): DashboardRecord => ({
+    id: makeId(),
+    user_id: userId,
+    data_type,
+    data,
+    created_at: now,
+    updated_at: now,
+  });
+  return [
+    record("wallet", { balance: 2450 }),
+    ...starterInventory.map((item) =>
+      record("inventory", item as unknown as Record<string, unknown>),
+    ),
+    record("payment", {
+      title: "Welcome reward",
+      counterparty: "FinisPay demo",
+      amount: 250,
+      direction: "received",
+      reference: `FP-${Date.now().toString().slice(-8)}`,
+    }),
+  ];
 }
 
 export default function Home() {
   const [status, setStatus] = useState<Status>("loading");
   const [mode, setMode] = useState<Mode>("login");
-  const [signup, setSignup] = useState(emptySignup);
-  const [login, setLogin] = useState({ email: "", password: "" });
-  const [showPassword, setShowPassword] = useState(false);
+  const [username, setUsername] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [records, setRecords] = useState<DashboardRecord[]>([]);
+  const recordsRef = useRef<DashboardRecord[]>([]);
   const [view, setView] = useState<View>("home");
   const [modal, setModal] = useState<Modal>(null);
   const [search, setSearch] = useState("");
@@ -196,192 +219,84 @@ export default function Home() {
     0,
   );
 
-  async function seedWorkspace(currentUser: User, current: DashboardRecord[]) {
-    if (current.some((r) => r.data_type === "inventory")) return current;
-    const rows = [
-      { user_id: currentUser.id, data_type: "wallet", data: { balance: 2450 } },
-      ...starterInventory.map((item) => ({
-        user_id: currentUser.id,
-        data_type: "inventory",
-        data: item,
-      })),
-      {
-        user_id: currentUser.id,
-        data_type: "payment",
-        data: {
-          title: "Welcome reward",
-          counterparty: "FinisPay demo",
-          amount: 250,
-          direction: "received",
-          reference: `FP-${Date.now().toString().slice(-8)}`,
-        },
-      },
-    ];
-    const { data, error } = await getSupabase()
-      .from("user_dashboard_data")
-      .insert(rows)
-      .select("*");
-    if (error) throw error;
-    return [...(data || []), ...current];
-  }
-  async function loadPrivateData(currentUser: User) {
-    const supabase = getSupabase();
-    const [p, d] = await Promise.all([
-      supabase.from("profiles").select("*").eq("id", currentUser.id).single(),
-      supabase
-        .from("user_dashboard_data")
-        .select("*")
-        .order("created_at", { ascending: false }),
-    ]);
-    if (p.error || d.error || !p.data)
-      throw p.error || d.error || new Error("Profile unavailable");
-    const hydrated = await seedWorkspace(currentUser, d.data || []);
-    setUser(currentUser);
-    setProfile(p.data);
-    setEditName(p.data.full_name);
-    setEditPhone(p.data.phone || "");
-    setRecords(hydrated);
+  function loadDemoProfile(savedProfile: Profile) {
+    let savedRecords = readLocal<DashboardRecord[]>(
+      recordsKey(savedProfile.username),
+    );
+    if (!savedRecords) {
+      savedRecords = starterRecords(savedProfile.id);
+      writeLocal(recordsKey(savedProfile.username), savedRecords);
+    }
+    localStorage.setItem(SESSION_KEY, savedProfile.username);
+    setProfile(savedProfile);
+    setEditName(savedProfile.full_name);
+    setEditPhone(savedProfile.phone || "");
+    recordsRef.current = savedRecords;
+    setRecords(savedRecords);
+    setUsername("");
     setStatus("signedIn");
   }
+
   useEffect(() => {
-    let mounted = true;
-    try {
-      const supabase = getSupabase();
-      Promise.race([
-        supabase.auth.getSession(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("timeout")), 8000),
-        ),
-      ])
-        .then(async ({ data, error }) => {
-          if (!mounted) return;
-          if (error) throw error;
-          if (data.session?.user) await loadPrivateData(data.session.user);
-          else setStatus("signedOut");
-        })
-        .catch(() => mounted && setStatus("unavailable"));
-      const { data: listener } = supabase.auth.onAuthStateChange(
-        (event, session) => {
-          if (!mounted) return;
-          if (event === "PASSWORD_RECOVERY") setStatus("recovery");
-          else if (event === "SIGNED_OUT") {
-            setUser(null);
-            setProfile(null);
-            setRecords([]);
-            setStatus("signedOut");
-          } else if (session?.user && event !== "INITIAL_SESSION")
-            setTimeout(
-              () =>
-                loadPrivateData(session.user).catch(() =>
-                  setStatus("unavailable"),
-                ),
-              0,
-            );
-        },
-      );
-      return () => {
-        mounted = false;
-        listener.subscription.unsubscribe();
-      };
-    } catch {
-      queueMicrotask(() => setStatus("unavailable"));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const timer = window.setTimeout(() => {
+      const activeUsername = localStorage.getItem(SESSION_KEY);
+      const savedProfile = activeUsername
+        ? readLocal<Profile>(profileKey(activeUsername))
+        : null;
+      if (savedProfile) loadDemoProfile(savedProfile);
+      else setStatus("signedOut");
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
-  async function handleSignup(event: FormEvent) {
+  function handleUsername(event: FormEvent) {
     event.preventDefault();
     setMessage("");
-    const validation = validateSignup(signup);
+    const value = username.trim();
+    const validation = validateUsername(value);
     if (validation) return setMessage(validation);
     setBusy(true);
     try {
-      const { data, error } = await getSupabase().auth.signUp({
-        email: signup.email.trim().toLowerCase(),
-        password: signup.password,
-        options: { data: { full_name: signup.fullName.trim() } },
-      });
-      if (error) throw error;
-      if (!data.session || !data.user)
-        throw new Error("Email confirmation is enabled");
-      await loadPrivateData(data.user);
-      setSignup(emptySignup);
-    } catch (error) {
-      setMessage(
-        friendlyAuthError(
-          error instanceof Error ? error.message : "",
-          "signup",
-        ),
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function handleLogin(event: FormEvent) {
-    event.preventDefault();
-    setMessage("");
-    if (!emailPattern.test(login.email.trim()))
-      return setMessage("Enter a valid email address.");
-    setBusy(true);
-    try {
-      const { data, error } = await getSupabase().auth.signInWithPassword({
-        email: login.email.trim().toLowerCase(),
-        password: login.password,
-      });
-      if (error || !data.user)
-        throw error || new Error("Invalid login credentials");
-      await loadPrivateData(data.user);
-      setLogin({ email: "", password: "" });
-    } catch (error) {
-      setMessage(
-        friendlyAuthError(error instanceof Error ? error.message : "", "login"),
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function sendReset() {
-    setMessage("");
-    if (!emailPattern.test(login.email.trim()))
-      return setMessage(
-        "Enter your email address first, then choose Forgot password.",
-      );
-    setBusy(true);
-    try {
-      const { error } = await getSupabase().auth.resetPasswordForEmail(
-        login.email.trim().toLowerCase(),
-        { redirectTo: window.location.origin },
-      );
-      if (error) throw error;
-      setMessage(
-        "If an account exists, a password-reset message has been sent.",
-      );
+      const savedProfile = readLocal<Profile>(profileKey(value));
+      if (mode === "login") {
+        if (!savedProfile) {
+          setMessage(
+            "No exact username match on this device. Usernames are case-sensitive.",
+          );
+          return;
+        }
+        loadDemoProfile(savedProfile);
+        return;
+      }
+      if (savedProfile) {
+        setMessage("That exact username already exists. Choose Login instead.");
+        return;
+      }
+      const now = new Date().toISOString();
+      const newProfile: Profile = {
+        id: makeId(),
+        username: value,
+        full_name: value,
+        phone: null,
+        created_at: now,
+        updated_at: now,
+      };
+      writeLocal(profileKey(value), newProfile);
+      loadDemoProfile(newProfile);
     } catch {
-      setMessage("Password reset is temporarily unavailable.");
+      setMessage("This browser could not save the demo profile.");
     } finally {
       setBusy(false);
     }
   }
-  async function updatePassword(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const password =
-      new FormData(event.currentTarget).get("newPassword")?.toString() || "";
-    const validation = validateSignup({
-      fullName: "OK",
-      email: "ok@example.com",
-      password,
-      confirmPassword: password,
-    });
-    if (validation) return setMessage(validation);
-    setBusy(true);
-    const { error } = await getSupabase().auth.updateUser({ password });
-    setBusy(false);
-    if (error) setMessage("Unable to update the password.");
-    else {
-      setMessage("Password updated.");
-      setStatus("signedIn");
-    }
+
+  function persistRecords(next: DashboardRecord[]) {
+    if (!profile) throw new Error("No active profile");
+    writeLocal(recordsKey(profile.username), next);
+    recordsRef.current = next;
+    setRecords(next);
   }
+
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -390,47 +305,55 @@ export default function Home() {
       setBusy(false);
       return setMessage("Enter your full name.");
     }
-    const { data, error } = await getSupabase()
-      .from("profiles")
-      .update({ full_name: name, phone: editPhone.trim() || null })
-      .eq("id", user!.id)
-      .select()
-      .single();
+    const updated = {
+      ...profile!,
+      full_name: name,
+      phone: editPhone.trim() || null,
+      updated_at: new Date().toISOString(),
+    };
+    writeLocal(profileKey(updated.username), updated);
+    setProfile(updated);
     setBusy(false);
-    if (error) setMessage("Profile could not be updated.");
-    else {
-      setProfile(data);
-      setMessage("Profile updated securely.");
-    }
+    setMessage("Profile updated on this device.");
   }
   async function saveRecord(type: string, data: Record<string, unknown>) {
-    const result = await getSupabase()
-      .from("user_dashboard_data")
-      .insert({ user_id: user!.id, data_type: type, data })
-      .select()
-      .single();
-    if (result.error) throw result.error;
-    setRecords((current) => [result.data, ...current]);
-    return result.data as DashboardRecord;
+    const now = new Date().toISOString();
+    const result: DashboardRecord = {
+      id: makeId(),
+      user_id: profile!.id,
+      data_type: type,
+      data,
+      created_at: now,
+      updated_at: now,
+    };
+    persistRecords([result, ...recordsRef.current]);
+    return result;
+  }
+  async function updateRecord(
+    record: DashboardRecord,
+    data: Record<string, unknown>,
+  ) {
+    const updated = {
+      ...record,
+      data,
+      updated_at: new Date().toISOString(),
+    };
+    persistRecords(
+      recordsRef.current.map((item) =>
+        item.id === record.id ? updated : item,
+      ),
+    );
+    return updated;
   }
   async function setWallet(next: number) {
     if (walletRecord) {
-      const { data, error } = await getSupabase()
-        .from("user_dashboard_data")
-        .update({ data: { balance: next } })
-        .eq("id", walletRecord.id)
-        .select()
-        .single();
-      if (error) throw error;
-      setRecords((current) =>
-        current.map((r) => (r.id === data.id ? data : r)),
-      );
+      await updateRecord(walletRecord, { balance: next });
     } else await saveRecord("wallet", { balance: next });
   }
   async function addInventory(item: InventoryData) {
     await saveRecord("inventory", item as unknown as Record<string, unknown>);
     setModal(null);
-    setMessage(`${item.name} saved to your private inventory.`);
+    setMessage(`${item.name} saved to this demo profile.`);
   }
   async function completePayment(
     payment: PaymentData,
@@ -469,19 +392,16 @@ export default function Home() {
     }
   }
   async function markAction(record: DashboardRecord, action: string) {
-    const { data, error } = await getSupabase()
-      .from("user_dashboard_data")
-      .update({ data: { ...record.data, actionStatus: action } })
-      .eq("id", record.id)
-      .select()
-      .single();
-    if (error) return setMessage("Action could not be saved.");
-    setRecords((current) => current.map((r) => (r.id === data.id ? data : r)));
+    await updateRecord(record, { ...record.data, actionStatus: action });
     setMessage(`${action} marked for ${String(record.data.name)}.`);
   }
   async function logout() {
     setBusy(true);
-    await getSupabase().auth.signOut();
+    localStorage.removeItem(SESSION_KEY);
+    setProfile(null);
+    recordsRef.current = [];
+    setRecords([]);
+    setStatus("signedOut");
     setBusy(false);
     setMessage("");
   }
@@ -491,34 +411,7 @@ export default function Home() {
       <main className="center">
         <div className="loader" />
         <Brand />
-        <p>Opening your secure workspace…</p>
-      </main>
-    );
-  if (status === "unavailable")
-    return (
-      <main className="center error-card">
-        <TriangleAlert />
-        <h1>Service unavailable</h1>
-        <p>We could not reach authentication or your private database.</p>
-        <button onClick={() => location.reload()}>Try again</button>
-      </main>
-    );
-  if (status === "recovery")
-    return (
-      <main className="auth-shell">
-        <section className="auth-card">
-          <Brand />
-          <h1>Choose a new password</h1>
-          <form onSubmit={updatePassword}>
-            <PasswordInput
-              name="newPassword"
-              label="New password"
-              shown={showPassword}
-              toggle={() => setShowPassword(!showPassword)}
-            />
-            <button disabled={busy}>Update password</button>
-          </form>
-        </section>
+        <p>Opening your demo workspace…</p>
       </main>
     );
   if (status === "signedOut")
@@ -526,18 +419,12 @@ export default function Home() {
       <AuthScreen
         mode={mode}
         setMode={setMode}
-        signup={signup}
-        setSignup={setSignup}
-        login={login}
-        setLogin={setLogin}
-        showPassword={showPassword}
-        setShowPassword={setShowPassword}
+        username={username}
+        setUsername={setUsername}
         busy={busy}
         message={message}
         clearMessage={() => setMessage("")}
-        handleLogin={handleLogin}
-        handleSignup={handleSignup}
-        sendReset={sendReset}
+        submit={handleUsername}
       />
     );
 
@@ -589,8 +476,8 @@ export default function Home() {
         <div className="side-status">
           <ShieldCheck />
           <span>
-            <b>Private by design</b>
-            <small>Protected by row-level security.</small>
+            <b>Demo profile</b>
+            <small>Saved only in this browser.</small>
           </span>
         </div>
         <button className="side-logout" onClick={logout}>
@@ -693,6 +580,7 @@ export default function Home() {
           busy={busy}
           pay={completePayment}
           add={addInventory}
+          update={updateRecord}
         />
       )}
       <Message text={message} floating />
@@ -729,7 +617,7 @@ function HomeView({
           <h1>Money moves. Product memory follows.</h1>
           <p>
             Every demo grocery payment can carry its batch, manufacturing date,
-            and expiry into your private inventory.
+            and expiry into your personal demo inventory.
           </p>
         </div>
         <div className="sync-badge">
@@ -1118,41 +1006,41 @@ function ProfileView({
   return (
     <>
       <PageHead
-        kicker="CONNECTED ACCOUNT"
+        kicker="DEMO PROFILE"
         title="Your profile"
-        copy="One secure identity opens both FinisPay and FinisFlow."
+        copy="One username opens both FinisPay and FinisFlow on this browser."
       />
       <section className="profile-layout">
         <article className="profile-summary">
           <div className="big-avatar">{profile.full_name[0]}</div>
           <h2>{profile.full_name}</h2>
-          <p>{profile.email}</p>
+          <p>@{profile.username}</p>
           <span>
-            <ShieldCheck /> Authenticated account
+            <ShieldCheck /> Browser demo profile
           </span>
           <button onClick={logout}>
-            <LogOut /> Secure logout
+            <LogOut /> Sign out
           </button>
         </article>
         <article className="surface profile-form">
           <div className="section-title">
             <div>
-              <span className="kicker">PERSONAL DETAILS</span>
+              <span className="kicker">PROFILE DETAILS</span>
               <h2>Edit profile</h2>
             </div>
             <Settings2 />
           </div>
           <form onSubmit={save}>
             <label>
-              Full name
+              Display name
               <input
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
               />
             </label>
             <label>
-              Email address
-              <input value={profile.email} disabled />
+              Login username <small>case-sensitive</small>
+              <input value={profile.username} disabled />
             </label>
             <label>
               Phone number <small>optional</small>
@@ -1167,10 +1055,10 @@ function ProfileView({
           <div className="data-note">
             <ShieldCheck />
             <span>
-              <b>Your records are isolated</b>
+              <b>Prototype storage</b>
               <small>
-                Only this account can access its profile, inventory, payments,
-                and dashboard records.
+                This username is not secure authentication. Demo data stays in
+                this browser and should not contain sensitive information.
               </small>
             </span>
           </div>
@@ -1189,6 +1077,7 @@ function ActionModal({
   busy,
   pay,
   add,
+  update,
 }: {
   type: Exclude<Modal, null>;
   close: () => void;
@@ -1198,6 +1087,10 @@ function ActionModal({
   busy: boolean;
   pay: (p: PaymentData, i?: InventoryData) => void;
   add: (i: InventoryData) => void;
+  update: (
+    record: DashboardRecord,
+    data: Record<string, unknown>,
+  ) => Promise<DashboardRecord>;
 }) {
   const [receiveAmount, setReceiveAmount] = useState(180);
   const [selected, setSelected] = useState(inventory[0]?.id || "");
@@ -1208,7 +1101,7 @@ function ActionModal({
   const selectedItem = inventory.find((r) => r.id === selected)?.item;
   const qrPayload = JSON.stringify({
     app: "FinisPay",
-    recipient: profile.email,
+    recipient: profile.username,
     amount: receiveAmount,
     item: selectedItem?.name,
     sku: selectedItem?.sku,
@@ -1440,15 +1333,10 @@ function ActionModal({
                     });
                     const row = inventory.find((r) => r.id === selected);
                     if (row)
-                      await getSupabase()
-                        .from("user_dashboard_data")
-                        .update({
-                          data: {
-                            ...row.data,
-                            quantity: Math.max(0, selectedItem.quantity - 1),
-                          },
-                        })
-                        .eq("id", row.id);
+                      await update(row, {
+                        ...row.data,
+                        quantity: Math.max(0, selectedItem.quantity - 1),
+                      });
                   }}
                 >
                   Simulate payment received
@@ -1954,18 +1842,12 @@ function Empty({
 type AuthProps = {
   mode: Mode;
   setMode: (mode: Mode) => void;
-  signup: typeof emptySignup;
-  setSignup: (value: typeof emptySignup) => void;
-  login: { email: string; password: string };
-  setLogin: (value: { email: string; password: string }) => void;
-  showPassword: boolean;
-  setShowPassword: (value: boolean) => void;
+  username: string;
+  setUsername: (value: string) => void;
   busy: boolean;
   message: string;
   clearMessage: () => void;
-  handleLogin: (event: FormEvent) => void;
-  handleSignup: (event: FormEvent) => void;
-  sendReset: () => void;
+  submit: (event: FormEvent) => void;
 };
 function AuthScreen(p: AuthProps) {
   return (
@@ -2029,99 +1911,44 @@ function AuthScreen(p: AuthProps) {
               p.clearMessage();
             }}
           >
-            Sign up
+            Create profile
           </button>
         </div>
-        {p.mode === "login" ? (
-          <form onSubmit={p.handleLogin}>
-            <div>
-              <h2>Welcome back</h2>
-              <p>Open your connected workspace.</p>
-            </div>
-            <label>
-              Email address
-              <input
-                type="email"
-                value={p.login.email}
-                onChange={(e) =>
-                  p.setLogin({ ...p.login, email: e.target.value })
-                }
-                placeholder="you@example.com"
-                required
-              />
-            </label>
-            <PasswordInput
-              name="password"
-              label="Password"
-              value={p.login.password}
-              onChange={(v) => p.setLogin({ ...p.login, password: v })}
-              shown={p.showPassword}
-              toggle={() => p.setShowPassword(!p.showPassword)}
-            />
-            <button className="auth-submit" disabled={p.busy}>
-              Login securely
-            </button>
-            <button className="text-button" type="button" onClick={p.sendReset}>
-              Forgot password?
-            </button>
-          </form>
-        ) : (
-          <form onSubmit={p.handleSignup}>
-            <div>
-              <h2>Create your account</h2>
-              <p>Your name and dashboard stay personal.</p>
-            </div>
-            <label>
-              Full name
-              <input
-                value={p.signup.fullName}
-                onChange={(e) =>
-                  p.setSignup({ ...p.signup, fullName: e.target.value })
-                }
-                required
-              />
-            </label>
-            <label>
-              Email address
-              <input
-                type="email"
-                value={p.signup.email}
-                onChange={(e) =>
-                  p.setSignup({ ...p.signup, email: e.target.value })
-                }
-                required
-              />
-            </label>
-            <PasswordInput
-              name="new-password"
-              label="Password"
-              value={p.signup.password}
-              onChange={(v) => p.setSignup({ ...p.signup, password: v })}
-              shown={p.showPassword}
-              toggle={() => p.setShowPassword(!p.showPassword)}
-            />
-            <label>
-              Confirm password
-              <input
-                type={p.showPassword ? "text" : "password"}
-                value={p.signup.confirmPassword}
-                onChange={(e) =>
-                  p.setSignup({ ...p.signup, confirmPassword: e.target.value })
-                }
-                required
-              />
-            </label>
-            <p className="hint">
-              8+ characters · uppercase · lowercase · number
+        <form onSubmit={p.submit}>
+          <div>
+            <h2>{p.mode === "login" ? "Welcome back" : "Create a demo profile"}</h2>
+            <p>
+              {p.mode === "login"
+                ? "Enter the same username with the exact uppercase and lowercase letters."
+                : "Choose one username for both FinisPay and FinisFlow."}
             </p>
-            <button className="auth-submit" disabled={p.busy}>
-              Create account & continue
-            </button>
-          </form>
-        )}
+          </div>
+          <label>
+            Username <small>case-sensitive</small>
+            <input
+              value={p.username}
+              onChange={(e) => p.setUsername(e.target.value)}
+              placeholder="Example: ShantanuT"
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              minLength={2}
+              maxLength={32}
+              required
+              autoFocus
+            />
+          </label>
+          <p className="hint">
+            “ShantanuT” and “shantanut” are treated as different usernames.
+          </p>
+          <button className="auth-submit" disabled={p.busy}>
+            {p.mode === "login" ? "Open my demo" : "Create profile & continue"}
+          </button>
+        </form>
         <Message text={p.message} />
         <p className="privacy">
-          <ShieldCheck /> Passwords are handled only by Supabase Auth.
+          <ShieldCheck /> Demo access only. A username alone cannot securely
+          verify identity, so do not store sensitive or real payment data.
         </p>
       </section>
     </main>
@@ -2152,37 +1979,5 @@ function Message({
     </p>
   ) : null;
 }
-function PasswordInput({
-  name,
-  label,
-  value,
-  onChange,
-  shown,
-  toggle,
-}: {
-  name: string;
-  label: string;
-  value?: string;
-  onChange?: (v: string) => void;
-  shown: boolean;
-  toggle: () => void;
-}) {
-  return (
-    <label>
-      {label}
-      <div className="password">
-        <input
-          name={name}
-          type={shown ? "text" : "password"}
-          value={value}
-          onChange={onChange ? (e) => onChange(e.target.value) : undefined}
-          required
-        />
-        <button type="button" onClick={toggle}>
-          {shown ? <EyeOff /> : <Eye />}
-        </button>
-      </div>
-    </label>
-  );
-}
+
 

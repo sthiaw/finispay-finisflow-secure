@@ -1,10 +1,13 @@
-export const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-export const passwordPattern = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/;
-
-export function validateSignup(input: { fullName: string; email: string; password: string; confirmPassword: string }) {
-  if (input.fullName.trim().length < 2) return "Enter your full name.";
-  if (!emailPattern.test(input.email.trim())) return "Enter a valid email address.";
-  if (!passwordPattern.test(input.password)) return "Password needs 8+ characters, including uppercase, lowercase and a number.";
-  if (input.password !== input.confirmPassword) return "Passwords do not match.";
+export function validateUsername(username: string) {
+  const value = username.trim();
+  if (value.length < 2) return "Username must contain at least 2 characters.";
+  if (value.length > 32) return "Username must contain no more than 32 characters.";
+  if (!/^[A-Za-z0-9._ -]+$/.test(value))
+    return "Use letters, numbers, spaces, dots, underscores or hyphens only.";
   return null;
 }
+
+export function usernamesMatch(saved: string, entered: string) {
+  return saved === entered.trim();
+}
+
